@@ -1,0 +1,131 @@
+##### read 10X .h5 ####
+k=0
+k1=0
+sub_scRNA <- list()
+dir.ls<-list.files()
+dir.ls<-dir.ls[c(2,4,6,8,10,12,14,16,18,20,24,26,28,30)]
+for (i in dir.ls) {
+  k1=k1+1
+  k=k+1
+  print (i)
+  print(k)
+  x <- as.character(i)
+  x<-strsplit(x,"_")
+  y<-x[[1]][1]
+  x<-paste(y,"_",sep = "")
+  print(x)
+  print(y)
+  RNA_counts<- Read10X_h5(i)
+  RNA_counts <- RNA_counts$`Gene Expression`
+  RNA_counts <- CreateSeuratObject(counts = RNA_counts,min.cells = 3,min.features = 0)
+  
+  #修改细胞的名称，需要再atac_fragments.tsv.gz文件中添加编号
+  rownames(RNA_counts@meta.data)<-paste(y,"_",rownames(RNA_counts@meta.data),sep = "")
+  colnames(RNA_counts@assays$RNA@counts)<-paste(y,"_",colnames(RNA_counts@assays$RNA@counts),sep = "")
+  colnames(RNA_counts@assays$RNA@data)<-paste(y,"_",colnames(RNA_counts@assays$RNA@data),sep = "")
+  names(RNA_counts@active.ident)<-paste(y,"_",names(RNA_counts@active.ident),sep = "")
+  RNA_counts$CB<-rownames(RNA_counts@meta.data)
+  RNA_counts$sample<-y
+  RNA_counts$log10GenesPerUMI <- log10(RNA_counts$nFeature_RNA) / log10(RNA_counts$nCount_RNA)
+  sub_scRNA[[y]]<-RNA_counts
+  
+  ### add mt per ###
+  mt.gene<-read.table("macac10_mt.gene.txt",header = T)
+  mt.gene<-c(mt.gene$Gene)
+  mt_gene_RM<-c(rownames(sub_scRNA[[y]]))
+  mt_2<-intersect(mt.gene,mt_gene_RM)
+  sub_scRNA[[y]][["mt"]] <- PercentageFeatureSet(sub_scRNA[[y]], features = mt_2)
+}
+
+
+### get expression matrix ###
+k=0
+dir.ls<-list.files()
+dir.ls<-dir.ls[c(12)]
+for (i in dir.ls) {
+  k=k+1
+  print (i)
+  print(k)
+  x <- as.character(i)
+  x<-strsplit(x,"_")
+  y<-x[[1]][1]
+  y1<-paste(y,".txt",sep = "")
+  print(y)
+  print(y1)
+  write.table(sub_scRNA[[y]]@assays$RNA@counts,file = y1,sep = "\t",quote=F,col.names = NA)
+}
+
+
+### filter low quality cell
+for (i in b) {
+  print(i)
+  k2 <- list(nCount_RNA=log10(ifnb[[i]]@meta.data$nCount_RNA),
+             nFeature_RNA=log10(ifnb[[i]]@meta.data$nFeature_RNA))
+  k2 %<>% map(~c(10^(mean(.x) + 3*sd(.x)), 10^(mean(.x) - 3*sd(.x))))
+  ifnb[[i]]<-subset( ifnb[[i]],subset=nFeature_RNA > 200 & 
+                                     nFeature_RNA < k2[[2]][1] & nCount_RNA < k2[[1]][1]  &
+                                     log10GenesPerUMI>0.8 & mt<5 & V2=="Singlet")
+                                     
+
+
+### one sample analysis ###
+seurat_RM07082B <- NormalizeData(seurat_RM07082B)
+seurat_RM07082B <- FindVariableFeatures(seurat_RM07082B, selection.method = "vst",
+                                               nfeatures = 2000)
+all.genes <- rownames(seurat_RM2205052)
+seurat_RM07082B <- ScaleData(seurat_RM07082B)
+seurat_RM07082B <- RunPCA(seurat_RM07082B, 
+                                 features = VariableFeatures(object = seurat_RM07082B))
+ElbowPlot(ifnb[["RM06050B"]],ndims = 50)
+seurat_RM07082B<- RunUMAP(seurat_RM07082B, dims = 1:20)
+FeaturePlot(seurat_RM07082B,features = "NEUROD6")
+DimPlot(seurat_RM07082B,group.by = "V2",label = T,label.size = 4)
+
+### using CCA to two or more samples analysis ###
+public_2<-SplitObject(public_merge, split.by = "")
+public_2 <- lapply(X = public_2, FUN = function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+features <- SelectIntegrationFeatures(object.list = public_2)
+immune.anchors <- FindIntegrationAnchors(object.list = public_2, 
+                                         anchor.features = features)
+
+public_CCA <- IntegrateData(anchorset = immune.anchors)
+DefaultAssay(public_CCA) <- "RNA"
+public_CCA <- ScaleData(public_CCA, verbose = FALSE)
+public_CCA <- RunPCA(public_CCA,verbose = FALSE)
+
+ElbowPlot(public_CCA)
+public_CCA <- RunUMAP(public_CCA, reduction = "pca", dims = 1:30)
+
+### using Rpca when many samples ###
+public_list<-SplitObject(public_merge)
+
+public_list <- lapply(X = public_list, FUN = function(x) {
+  x <- ScaleData(x, features = features, verbose = FALSE)
+  x <- RunPCA(x, features = features, verbose = FALSE)
+})
+anchors <- FindIntegrationAnchors(object.list = public_list, anchor.features = features, reduction = 'rpca')
+public_rpca<- IntegrateData(anchorset = anchors, dims = 1:50)
+public_rpca <- ScaleData(public_rpca, verbose = FALSE)
+public_rpca <- RunPCA(public_rpca, verbose = FALSE)
+public_rpca <- RunUMAP(public_rpca, dims = 1:30)
+FeaturePlot(public_rpca,features = c("PAX6"),raster=F)
+DimPlot(public_rpca,group.by = "structure",label = T,label.size = 4)
+
+
+### using public data to predict ###
+pancreas.anchors <- FindTransferAnchors(reference = public_CCA, query = seurat_RM06050A,
+                                        dims = 1:50, reference.reduction = "pca")
+predictions <- TransferData(anchorset = pancreas.anchors, refdata = public_CCA$cell.type,
+                            dims = 1:30)
+
+pancreas.query <- AddMetaData(seurat_RM06050A, metadata = predictions)
+DimPlot(pancreas.query, reduction = "umap", group.by = "predicted.id", label = TRUE,
+        label.size = 4)
+
+
+
+
+
